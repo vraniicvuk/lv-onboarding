@@ -405,7 +405,7 @@ class TicketFlowView(View):
 
     async def on_level(self, interaction: discord.Interaction):
         self.level = self._level_select.values[0]
-        self.disable_all_items()
+        self._level_select.disabled = True
         await interaction.response.edit_message(
             content=(
                 f"✅ Smena: **{SHIFT_LABELS.get(self.shift, self.shift)}** "
