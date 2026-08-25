@@ -110,10 +110,14 @@ def init_db():
             user_id INTEGER,
             created_at TEXT,
             stage INTEGER DEFAULT 0,
-            done INTEGER DEFAULT 0
+            done INTEGER DEFAULT 0,
+            kind TEXT DEFAULT 'mass'
         )
         """
     )
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(domaci)").fetchall()]
+    if "kind" not in cols:
+        conn.execute("ALTER TABLE domaci ADD COLUMN kind TEXT DEFAULT 'mass'")
     conn.commit()
     conn.close()
 
@@ -134,11 +138,11 @@ def set_state(key, value):
     conn.close()
 
 
-def add_domaci(message_id, channel_id, user_id, created_at):
+def add_domaci(message_id, channel_id, user_id, created_at, kind="mass"):
     conn = _db()
     conn.execute(
-        "INSERT OR IGNORE INTO domaci (message_id, channel_id, user_id, created_at) VALUES (?,?,?,?)",
-        (message_id, channel_id, user_id, created_at),
+        "INSERT OR IGNORE INTO domaci (message_id, channel_id, user_id, created_at, kind) VALUES (?,?,?,?,?)",
+        (message_id, channel_id, user_id, created_at, kind),
     )
     conn.commit()
     conn.close()
@@ -259,31 +263,56 @@ def need_manage_roles():
 
 
 # ==================== AI — pregled domaćeg ====================
-DOMACI_SYSTEM_PROMPT = os.getenv(
-    "DOMACI_PROMPT",
+MASS_SYSTEM_PROMPT = os.getenv(
+    "MASS_PROMPT",
     (
-        "Ti si kontrolor zadatka ('domaći') za novajlije u OnlyFans management timu.\n"
-        "Novajlija šalje tekst koji sadrži: (1) mass message i (2) ispisane PPV poruke.\n"
-        "Tvoj zadatak je da proveriš da li je zadatak ispravno odrađen i daš kratku povratnu informaciju.\n\n"
+        "Ti si kontrolor 'domaći' zadatka za novajlije u OnlyFans management timu.\n"
+        "Novajlija šalje MASS MESSAGE (poruku koja se šalje fanovima).\n"
+        "Proveri da li je ispravna za predaju i daj kratku povratnu informaciju.\n\n"
         "Proveri sledeće:\n"
-        "- Mass message: pravilno formatiran (bez grešaka, prikladna dužina, poziv na akciju, profesionalan ton, prikladna upotreba emojija).\n"
-        "- PPV poruke: ispravno ispisane, u skladu sa traženim formatom, dovoljno dugačke (kvota reči), zanimljive i prodajne.\n"
-        "- Da li su ispunjene kvote reči/formata za oba dela.\n\n"
+        "- Hook: da li prva linija privlači pažnju i vuče na dalje čitanje.\n"
+        "- Personalizacija: koristi li token za ime (npr. {name}/[name]) umesto generičkog početka.\n"
+        "- Dužina: dovoljno duga i unutar tražene kvote reči.\n"
+        "- Ton: prirodan, ličan, nije robotski/previše formalan.\n"
+        "- Call to action: jasno je šta fan treba da uradi (reply, klik, kupovina).\n"
+        "- Emoji: prikladna upotreba (ne previše, ne ništa).\n"
+        "- Formatiranje/pravopis: bez grešaka, ispravan prelom redova.\n"
+        "- Zabranjene reči/fraze koje mogu da trigeruju ban ili spam filter.\n\n"
         "Format odgovora:\n"
         "- Ako je sve ispravno, odgovori samo: ✅ OK\n"
-        "- Ako nešto fali, navedi kratko i konkretno šta tačno treba popraviti (nabrojano), na srpskom."
+        "- Ako nešto fali, navedi kratko i konkretno (nabrojano) šta tačno popraviti, na srpskom."
+    ),
+)
+
+PPV_SYSTEM_PROMPT = os.getenv(
+    "PPV_PROMPT",
+    (
+        "Ti si kontrolor 'domaći' zadatka za novajlije u OnlyFans management timu.\n"
+        "Novajlija šalje PPV poruke (pay-per-view / plaćeni sadržaj).\n"
+        "Proveri da li su ispravne za predaju i daj kratku povratnu informaciju.\n\n"
+        "Proveri sledeće:\n"
+        "- Struktura: ispravan format PPV poruke (teaser + opis sadržaja + cena).\n"
+        "- Cena: jasno navedena.\n"
+        "- Teaser: zanimljiv, budi znatiželju bez otkrivanja svega.\n"
+        "- Dužina: unutar tražene kvote reči.\n"
+        "- Prodajnost: ubedljivo, lično, konkretno.\n"
+        "- Emoji/ton: prikladno.\n"
+        "- Pravopis/formatiranje: bez grešaka.\n\n"
+        "Format odgovora:\n"
+        "- Ako je sve ispravno, odgovori samo: ✅ OK\n"
+        "- Ako nešto fali, navedi kratko i konkretno (nabrojano) šta tačno popraviti, na srpskom."
     ),
 )
 
 
-async def check_domaci(text: str) -> str:
+async def _ai_check(system_prompt: str, text: str) -> str:
     if not client:
         return "⚠️ AI nije dostupan (nema OPENAI_API_KEY ili USE_AI=false)."
     def _call():
         rsp = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": DOMACI_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text},
             ],
             temperature=0.2,
@@ -298,13 +327,41 @@ async def check_domaci(text: str) -> str:
         return "⚠️ AI pregled nije uspeo — proverite ručno."
 
 
-class DomaciModal(Modal, title="Domaći"):
+async def submit_domaci(interaction, text, kind, title):
+    created = _local_now()
+    # 1) pošalji domaći tekst (prva poruka = referenca za ✅ i podsetnik)
+    chunks = [text[i : i + 1900] for i in range(0, len(text), 1900)]
+    first = None
+    for idx, ch in enumerate(chunks):
+        content = f"📝 **{title}** — {interaction.user.mention}\n\n{ch}" if idx == 0 else ch
+        msg = await interaction.followup.send(content, wait=True)
+        if idx == 0:
+            first = msg
+
+    # 2) registruj u DB (pre AI, da podsetnik radi i ako AI padne)
+    if first:
+        add_domaci(first.id, interaction.channel.id, interaction.user.id, created.isoformat(), kind)
+        try:
+            await first.add_reaction("✅")
+        except Exception:
+            pass
+
+    # 3) AI pregled
+    prompt = MASS_SYSTEM_PROMPT if kind == "mass" else PPV_SYSTEM_PROMPT
+    result = await _ai_check(prompt, text)
+    await interaction.followup.send(
+        f"🤖 **AI pregled ({title}):**\n\n{result}\n\n"
+        f"Support: klikni ✅ na gornju poruku kad pregledaš (zaustavlja podsetnik)."
+    )
+
+
+class MassModal(Modal, title="Mass Message"):
     def __init__(self):
         super().__init__(timeout=None)
         self.domaci = TextInput(
-            label="Zalepi domaći",
+            label="Zalepi mass message",
             style=TextStyle.paragraph,
-            placeholder="Mass message + PPV poruke…",
+            placeholder="Mass message…",
             required=True,
             max_length=4000,
         )
@@ -314,41 +371,46 @@ class DomaciModal(Modal, title="Domaći"):
         text = self.domaci.value.strip()
         await interaction.response.defer(thinking=True)
         if not text:
-            return await interaction.followup.send("❌ Prazan domaći.", ephemeral=True)
+            return await interaction.followup.send("❌ Prazan mass message.", ephemeral=True)
+        await submit_domaci(interaction, text, "mass", "Mass Message")
 
-        created = _local_now()
-        # 1) pošalji domaći tekst (prva poruka = referenca za ✅ i podsetnik)
-        chunks = [text[i : i + 1900] for i in range(0, len(text), 1900)]
-        first = None
-        for idx, ch in enumerate(chunks):
-            content = f"📝 **Domaći** — {interaction.user.mention}\n\n{ch}" if idx == 0 else ch
-            msg = await interaction.followup.send(content, wait=True)
-            if idx == 0:
-                first = msg
 
-        # 2) registruj u DB (pre AI, da podsetnik radi i ako AI padne)
-        if first:
-            add_domaci(first.id, interaction.channel.id, interaction.user.id, created.isoformat())
-            try:
-                await first.add_reaction("✅")
-            except Exception:
-                pass
-
-        # 3) AI pregled
-        result = await check_domaci(text)
-        await interaction.followup.send(
-            f"🤖 **AI pregled:**\n\n{result}\n\n"
-            f"Support: klikni ✅ na gornju poruku kad pregledaš (zaustavlja podsetnik)."
+class PpvModal(Modal, title="PPV"):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.domaci = TextInput(
+            label="Zalepi PPV poruke",
+            style=TextStyle.paragraph,
+            placeholder="PPV poruke…",
+            required=True,
+            max_length=4000,
         )
+        self.add_item(self.domaci)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        text = self.domaci.value.strip()
+        await interaction.response.defer(thinking=True)
+        if not text:
+            return await interaction.followup.send("❌ Prazan PPV.", ephemeral=True)
+        await submit_domaci(interaction, text, "ppv", "PPV")
 
 
-@tree.command(name="domaci", description="Pošalji domaći na pregled (u svom ticketu)", guild=GUILD_OBJ)
-async def domaci(interaction: discord.Interaction):
+@tree.command(name="domacimm", description="Pošalji mass message na pregled (u svom ticketu)", guild=GUILD_OBJ)
+async def domacimm(interaction: discord.Interaction):
     if not _is_ticket_channel(interaction.channel):
         return await interaction.response.send_message(
             "❌ Domaći šalješ unutar svog ticket kanala.", ephemeral=True
         )
-    await interaction.response.send_modal(DomaciModal())
+    await interaction.response.send_modal(MassModal())
+
+
+@tree.command(name="domacippv", description="Pošalji PPV poruke na pregled (u svom ticketu)", guild=GUILD_OBJ)
+async def domacippv(interaction: discord.Interaction):
+    if not _is_ticket_channel(interaction.channel):
+        return await interaction.response.send_message(
+            "❌ Domaći šalješ unutar svog ticket kanala.", ephemeral=True
+        )
+    await interaction.response.send_modal(PpvModal())
 
 
 # ==================== TICKET FLOW ====================
@@ -629,9 +691,10 @@ async def domaci_reminder_loop():
                 if GUILD_ID
                 else ""
             )
+            kind_label = "Mass Message" if d.get("kind") == "mass" else "PPV"
             try:
                 await channel.send(
-                    f"<@&{role_id}> 🔔 Podsetnik za pregled domaćeg od <@{d['user_id']}> "
+                    f"<@&{role_id}> 🔔 Podsetnik za pregled {kind_label} od <@{d['user_id']}> "
                     f"(prošlo {(d['stage'] + 1) * REMINDER_STAGE_HOURS}h).\n{link}"
                 )
             except Exception as e:
