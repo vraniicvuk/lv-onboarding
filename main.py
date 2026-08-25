@@ -7,7 +7,8 @@ import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from discord.ui import View, Select
+from discord.ui import View, Select, Modal, TextInput
+from discord import TextStyle
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -60,7 +61,6 @@ def _env_int_list(key):
 TICKET_CATEGORY_ID = _env_int("TICKET_CATEGORY_ID")
 INEXPERIENCED_CATEGORY_ID = _env_int("INEXPERIENCED_CATEGORY_ID")
 EXPERIENCED_CATEGORY_ID = _env_int("EXPERIENCED_CATEGORY_ID")
-DOMACI_CHANNEL_ID = _env_int("DOMACI_CHANNEL_ID")
 TRANSCRIPT_CATEGORY_ID = _env_int("TRANSCRIPT_CATEGORY_ID")
 
 SHIFT_GRAVEYARD_ROLE_ID = _env_int("SHIFT_GRAVEYARD_ROLE_ID")
@@ -297,22 +297,57 @@ async def check_domaci(text: str) -> str:
         return "⚠️ AI pregled nije uspeo — proverite ručno."
 
 
-async def handle_domaci(message):
-    text = (message.content or "").strip()
-    if not text:
-        return
-    created = _local_now()
-    add_domaci(message.id, message.channel.id, message.author.id, created.isoformat())
-    result = await check_domaci(text)
-    try:
-        await message.add_reaction("✅")
-    except Exception:
-        pass
-    await message.reply(
-        f"📝 **Pregled domaćeg** (by {message.author.mention})\n\n{result}\n\n"
-        f"Support: kad pregledaš, klikni ✅ na originalnu poruku da se podsetnik zaustavi.",
-        mention_author=False,
-    )
+class DomaciModal(Modal, title="Domaći"):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.domaci = TextInput(
+            label="Zalepi domaći",
+            style=TextStyle.paragraph,
+            placeholder="Mass message + PPV poruke…",
+            required=True,
+            max_length=4000,
+        )
+        self.add_item(self.domaci)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        text = self.domaci.value.strip()
+        await interaction.response.defer(thinking=True)
+        if not text:
+            return await interaction.followup.send("❌ Prazan domaći.", ephemeral=True)
+
+        created = _local_now()
+        # 1) pošalji domaći tekst (prva poruka = referenca za ✅ i podsetnik)
+        chunks = [text[i : i + 1900] for i in range(0, len(text), 1900)]
+        first = None
+        for idx, ch in enumerate(chunks):
+            content = f"📝 **Domaći** — {interaction.user.mention}\n\n{ch}" if idx == 0 else ch
+            msg = await interaction.followup.send(content, wait=True)
+            if idx == 0:
+                first = msg
+
+        # 2) registruj u DB (pre AI, da podsetnik radi i ako AI padne)
+        if first:
+            add_domaci(first.id, interaction.channel.id, interaction.user.id, created.isoformat())
+            try:
+                await first.add_reaction("✅")
+            except Exception:
+                pass
+
+        # 3) AI pregled
+        result = await check_domaci(text)
+        await interaction.followup.send(
+            f"🤖 **AI pregled:**\n\n{result}\n\n"
+            f"Support: klikni ✅ na gornju poruku kad pregledaš (zaustavlja podsetnik)."
+        )
+
+
+@tree.command(name="domaci", description="Pošalji domaći na pregled (u svom ticketu)", guild=GUILD_OBJ)
+async def domaci(interaction: discord.Interaction):
+    if not _is_ticket_channel(interaction.channel):
+        return await interaction.response.send_message(
+            "❌ Domaći šalješ unutar svog ticket kanala.", ephemeral=True
+        )
+    await interaction.response.send_modal(DomaciModal())
 
 
 # ==================== TICKET FLOW ====================
@@ -563,11 +598,11 @@ async def shift(interaction: discord.Interaction, smena: str):
 async def domaci_reminder_loop():
     if not REMINDER_ROLE_IDS:
         return
-    channel = bot.get_channel(DOMACI_CHANNEL_ID) if DOMACI_CHANNEL_ID else None
-    if not channel:
-        return
     now = _local_now()
     for d in get_pending_domaci():
+        channel = bot.get_channel(d["channel_id"]) if d["channel_id"] else None
+        if not channel:
+            continue
         try:
             created = datetime.fromisoformat(d["created_at"])
         except Exception:
@@ -602,15 +637,6 @@ async def _before_domaci_reminder():
 
 
 # ==================== EVENTS ====================
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-    if DOMACI_CHANNEL_ID and message.channel.id == DOMACI_CHANNEL_ID:
-        await handle_domaci(message)
-    await bot.process_commands(message)
-
-
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if str(payload.emoji) != "✅":
