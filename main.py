@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from openai import OpenAI
+from aiohttp import web
 
 # --- env first ---
 load_dotenv()
@@ -22,6 +23,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 USE_AI = os.getenv("USE_AI", "true").lower() in ("1", "true", "yes", "on")
 
 DB_PATH = os.getenv("DB_PATH", "/data/onboarding.db")
+BRIDGE_PORT = int(os.getenv("PORT", os.getenv("BRIDGE_PORT", "8080")))
 
 client = OpenAI(api_key=OPENAI_API_KEY) if (USE_AI and OPENAI_API_KEY) else None
 if not TOKEN:
@@ -659,6 +661,21 @@ async def on_app_command_error(interaction: discord.Interaction, error):
         pass
 
 
+# ==================== HTTP HEALTH (za Render Web Service) ====================
+async def handle_health(request):
+    return web.Response(text="ok")
+
+
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get("/", handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", BRIDGE_PORT)
+    await site.start()
+    print(f"[HTTP] server sluša na portu {BRIDGE_PORT}")
+
+
 # ==================== ON READY ====================
 @bot.event
 async def on_ready():
@@ -674,6 +691,7 @@ async def on_ready():
         if not domaci_reminder_loop.is_running():
             domaci_reminder_loop.start()
             print("✅ Domaći reminder task pokrenut")
+        asyncio.create_task(start_http_server())
     except Exception as e:
         print("sync fail:", e)
 
