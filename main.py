@@ -68,6 +68,9 @@ SHIFT_MAIN_ROLE_ID = _env_int("SHIFT_MAIN_ROLE_ID")
 REMINDER_ROLE_IDS = _env_int_list("REMINDER_ROLE_IDS")
 SUPPORT_ROLE_IDS = _env_int_list("SUPPORT_ROLE_IDS")
 
+# Sve role koje vide tickete, bivaju pingovane pri otvaranju i smeju da kliknu ✅
+REVIEW_ROLE_IDS = list(dict.fromkeys(SUPPORT_ROLE_IDS + REMINDER_ROLE_IDS))
+
 SHIFT_ROLE_MAP = {
     "graveyard": SHIFT_GRAVEYARD_ROLE_ID,
     "afternoon": SHIFT_AFTERNOON_ROLE_ID,
@@ -202,7 +205,7 @@ def can_touch_role(bot_member: discord.Member, role: discord.Role) -> bool:
 def is_support(member):
     if member.guild_permissions.manage_roles or member.guild_permissions.administrator:
         return True
-    return any(r.id in SUPPORT_ROLE_IDS for r in member.roles)
+    return any(r.id in REVIEW_ROLE_IDS for r in member.roles)
 
 
 async def safe_add_roles(member, roles, reason):
@@ -363,7 +366,7 @@ LEVEL_OPTIONS = [
 
 class TicketFlowView(View):
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(timeout=1800)
         self.shift = None
         self.level = None
         self._shift_select = Select(
@@ -438,7 +441,7 @@ async def ticket(interaction: discord.Interaction):
             view_channel=True, send_messages=True, read_messages=True
         ),
     }
-    for rid in SUPPORT_ROLE_IDS:
+    for rid in REVIEW_ROLE_IDS:
         role = guild.get_role(rid)
         if role:
             overwrites[role] = discord.PermissionOverwrite(
@@ -455,7 +458,7 @@ async def ticket(interaction: discord.Interaction):
     except Exception as e:
         return await interaction.followup.send(f"❌ Greška: {e}", ephemeral=True)
 
-    mentions = [interaction.user.mention] + [f"<@&{rid}>" for rid in SUPPORT_ROLE_IDS]
+    mentions = [interaction.user.mention] + [f"<@&{rid}>" for rid in REVIEW_ROLE_IDS]
     await ch.send(" ".join(mentions))
     await ch.send(
         "🎟️ **Novi ticket**\n"
