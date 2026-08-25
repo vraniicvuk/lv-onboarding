@@ -36,8 +36,6 @@ REMINDER_STAGE_HOURS = 6  # svaka faza podsetnika na 6 sati
 
 # ---------- BOT ----------
 INTENTS = discord.Intents.default()
-INTENTS.members = True
-INTENTS.message_content = True
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
 tree = bot.tree
 GUILD_OBJ = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
