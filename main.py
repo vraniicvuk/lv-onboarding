@@ -21,12 +21,17 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")
 USE_AI = os.getenv("USE_AI", "true").lower() in ("1", "true", "yes", "on")
 
 DB_PATH = os.getenv("DB_PATH", "/data/onboarding.db")
 BRIDGE_PORT = int(os.getenv("PORT", os.getenv("BRIDGE_PORT", "8080")))
 
-client = OpenAI(api_key=OPENAI_API_KEY) if (USE_AI and OPENAI_API_KEY) else None
+client = (
+    OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL or None)
+    if (USE_AI and OPENAI_API_KEY)
+    else None
+)
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN nije setovan u .env")
 
