@@ -76,6 +76,12 @@ SUPPORT_ROLE_IDS = _env_int_list("SUPPORT_ROLE_IDS")
 # Sve role koje vide tickete, bivaju pingovane pri otvaranju i smeju da kliknu ✅
 REVIEW_ROLE_IDS = list(dict.fromkeys(SUPPORT_ROLE_IDS + REMINDER_ROLE_IDS))
 
+# Redosled pingovanja za pregled domaćeg: odmah 1. rola, pa 6h opet 1., pa 6h 2., pa 6h 3.
+# [r0, r0, r1, r2]
+REMINDER_SEQUENCE = (
+    [REMINDER_ROLE_IDS[0]] + REMINDER_ROLE_IDS if REMINDER_ROLE_IDS else []
+)
+
 SHIFT_ROLE_MAP = {
     "graveyard": SHIFT_GRAVEYARD_ROLE_ID,
     "afternoon": SHIFT_AFTERNOON_ROLE_ID,
@@ -369,6 +375,17 @@ async def submit_domaci(interaction, text, kind, title):
             await first.add_reaction("✅")
         except Exception:
             pass
+        # odmah taguj prvu rolu, pa dalje ide 6h eskalacija kroz loop
+        if REMINDER_SEQUENCE:
+            kind_label = "Mass Message" if kind == "mass" else "PPV"
+            try:
+                await interaction.channel.send(
+                    f"<@&{REMINDER_SEQUENCE[0]}> 🔔 Novi {kind_label} za pregled od "
+                    f"{interaction.user.mention}.\n{first.jump_url}"
+                )
+                set_domaci_stage(first.id, 1)
+            except Exception as e:
+                print("[REMINDER] immediate ping fail:", e)
 
     # 3) AI pregled
     prompt = MASS_SYSTEM_PROMPT if kind == "mass" else PPV_SYSTEM_PROMPT
@@ -693,7 +710,7 @@ async def shift(interaction: discord.Interaction, smena: str):
 # ==================== 6H REMINDER LOOP ====================
 @tasks.loop(minutes=10)
 async def domaci_reminder_loop():
-    if not REMINDER_ROLE_IDS:
+    if not REMINDER_SEQUENCE:
         return
     now = _local_now()
     for d in get_pending_domaci():
@@ -706,10 +723,10 @@ async def domaci_reminder_loop():
             continue
         hours_elapsed = (now - created).total_seconds() / 3600
         while (
-            d["stage"] < len(REMINDER_ROLE_IDS)
-            and hours_elapsed >= (d["stage"] + 1) * REMINDER_STAGE_HOURS
+            d["stage"] < len(REMINDER_SEQUENCE)
+            and hours_elapsed >= d["stage"] * REMINDER_STAGE_HOURS
         ):
-            role_id = REMINDER_ROLE_IDS[d["stage"]]
+            role_id = REMINDER_SEQUENCE[d["stage"]]
             link = (
                 f"https://discord.com/channels/{GUILD_ID}/{d['channel_id']}/{d['message_id']}"
                 if GUILD_ID
@@ -719,7 +736,7 @@ async def domaci_reminder_loop():
             try:
                 await channel.send(
                     f"<@&{role_id}> 🔔 Podsetnik za pregled {kind_label} od <@{d['user_id']}> "
-                    f"(prošlo {(d['stage'] + 1) * REMINDER_STAGE_HOURS}h).\n{link}"
+                    f"(prošlo {d['stage'] * REMINDER_STAGE_HOURS}h).\n{link}"
                 )
             except Exception as e:
                 print("[REMINDER] send fail:", e)
