@@ -375,6 +375,16 @@ class TicketFlowView(View):
         self._shift_select.callback = self.on_shift
         self.add_item(self._shift_select)
 
+    async def on_error(self, interaction, error, item):
+        print("[TICKET VIEW] error:", repr(error))
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"❌ Greška: {error}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Greška: {error}", ephemeral=True)
+        except Exception:
+            pass
+
     async def on_shift(self, interaction: discord.Interaction):
         self.shift = self._shift_select.values[0]
         hours = SHIFT_SCHEDULE.get(self.shift, "")
