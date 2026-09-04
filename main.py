@@ -66,9 +66,12 @@ INEXPERIENCED_CATEGORY_ID = _env_int("INEXPERIENCED_CATEGORY_ID")
 EXPERIENCED_CATEGORY_ID = _env_int("EXPERIENCED_CATEGORY_ID")
 TRANSCRIPT_CATEGORY_ID = _env_int("TRANSCRIPT_CATEGORY_ID")
 
-SHIFT_GRAVEYARD_ROLE_ID = _env_int("SHIFT_GRAVEYARD_ROLE_ID")
-SHIFT_AFTERNOON_ROLE_ID = _env_int("SHIFT_AFTERNOON_ROLE_ID")
-SHIFT_MAIN_ROLE_ID = _env_int("SHIFT_MAIN_ROLE_ID")
+SHIFT_GRAVEYARD_ROLE_ID = _env_int("SHIFT_GRAVEYARD_ROLE_ID") or 1453781684532019272
+SHIFT_AFTERNOON_ROLE_ID = _env_int("SHIFT_AFTERNOON_ROLE_ID") or 1453781654765178934
+SHIFT_MAIN_ROLE_ID = _env_int("SHIFT_MAIN_ROLE_ID") or 1453781572460482753
+
+EXPERIENCED_ROLE_ID = _env_int("EXPERIENCED_ROLE_ID") or 1460974714720620604
+INEXPERIENCED_ROLE_ID = _env_int("INEXPERIENCED_ROLE_ID") or 1460974855133462608
 # Eskalacija podsetnika (redom): svakih 6h se taguje sledeća rola u listi
 REMINDER_ROLE_IDS = _env_int_list("REMINDER_ROLE_IDS")
 SUPPORT_ROLE_IDS = _env_int_list("SUPPORT_ROLE_IDS")
@@ -529,6 +532,13 @@ class TicketFlowView(View):
             ),
             view=self,
         )
+        role_id = SHIFT_ROLE_MAP.get(self.shift)
+        role = interaction.guild.get_role(role_id) if role_id else None
+        if role:
+            try:
+                await safe_add_roles(interaction.user, [role], reason=f"ticket smena {self.shift}")
+            except Exception as e:
+                print("[TICKET] shift role add fail:", e)
 
     async def on_level(self, interaction: discord.Interaction):
         self.level = self._level_select.values[0]
@@ -542,6 +552,13 @@ class TicketFlowView(View):
             ),
             view=self,
         )
+        exp_id = EXPERIENCED_ROLE_ID if self.level == "experienced" else INEXPERIENCED_ROLE_ID
+        exp_role = interaction.guild.get_role(exp_id) if exp_id else None
+        if exp_role:
+            try:
+                await safe_add_roles(interaction.user, [exp_role], reason=f"ticket nivo {self.level}")
+            except Exception as e:
+                print("[TICKET] level role add fail:", e)
         target_id = (
             INEXPERIENCED_CATEGORY_ID
             if self.level == "inexperienced"
