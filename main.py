@@ -477,6 +477,19 @@ LEVEL_OPTIONS = [
     discord.SelectOption(label="EXPERIENCED", value="experienced"),
 ]
 
+EXPERIENCED_QUESTIONS = (
+    "**Pitanja za tebe:**\n"
+    "1. Ime agencije u kojoj si radio? (poželjno sve da se nabroje)\n"
+    "2. Na koliko si naloga radio?\n"
+    "3. Koju smenu?\n"
+    "4. Koji ti je najjači mesec?\n"
+    "5. Zarada u toj agenciji?\n"
+    "6. Jesi li radio na procenat ili fix, itd.\n"
+    "7. Šta je razlog odlaska/otkaza?\n"
+    "8. Koja su ti očekivanja sada?\n"
+    "9. Koju bi smenu radio i da li si fleksibilan da radiš neku drugu dok ne kreneš u tu koju si na početku hteo?"
+)
+
 
 class TicketFlowView(View):
     def __init__(self):
@@ -547,6 +560,14 @@ class TicketFlowView(View):
             )
         except Exception as e:
             print("[TICKET] routing fail:", e)
+
+        if self.level == "experienced":
+            try:
+                await interaction.channel.send(
+                    f"{interaction.user.mention}\n\n{EXPERIENCED_QUESTIONS}"
+                )
+            except Exception as e:
+                print("[TICKET] experienced questions fail:", e)
 
 
 @tree.command(name="ticket", description="Otvori novi ticket", guild=GUILD_OBJ)
