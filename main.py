@@ -76,6 +76,17 @@ SUPPORT_ROLE_IDS = _env_int_list("SUPPORT_ROLE_IDS")
 # Sve role koje vide tickete, bivaju pingovane pri otvaranju i smeju da kliknu ✅
 REVIEW_ROLE_IDS = list(dict.fromkeys(SUPPORT_ROLE_IDS + REMINDER_ROLE_IDS))
 
+# Role koje UVEK imaju pristup ticket kanalima (po zahtevu)
+TICKET_ACCESS_ROLE_IDS = [
+    1453746980525314099,
+    1453746690342391808,
+    1532337994726379620,
+    1513881905005723758,
+]
+
+# Sve role koje vide tickete + bivaju pingovane + smeju ✅
+TICKET_TEAM_ROLE_IDS = list(dict.fromkeys(REVIEW_ROLE_IDS + TICKET_ACCESS_ROLE_IDS))
+
 # Redosled pingovanja za pregled domaćeg: odmah 1. rola, pa 6h opet 1., pa 6h 2., pa 6h 3.
 # [r0, r0, r1, r2]
 REMINDER_SEQUENCE = (
@@ -220,7 +231,7 @@ def can_touch_role(bot_member: discord.Member, role: discord.Role) -> bool:
 def is_support(member):
     if member.guild_permissions.manage_roles or member.guild_permissions.administrator:
         return True
-    return any(r.id in REVIEW_ROLE_IDS for r in member.roles)
+    return any(r.id in TICKET_TEAM_ROLE_IDS for r in member.roles)
 
 
 async def safe_add_roles(member, roles, reason):
@@ -554,7 +565,7 @@ async def ticket(interaction: discord.Interaction):
             view_channel=True, send_messages=True, read_messages=True
         ),
     }
-    for rid in REVIEW_ROLE_IDS:
+    for rid in TICKET_TEAM_ROLE_IDS:
         role = guild.get_role(rid)
         if role:
             overwrites[role] = discord.PermissionOverwrite(
@@ -571,7 +582,7 @@ async def ticket(interaction: discord.Interaction):
     except Exception as e:
         return await interaction.followup.send(f"❌ Greška: {e}", ephemeral=True)
 
-    mentions = [interaction.user.mention] + [f"<@&{rid}>" for rid in REVIEW_ROLE_IDS]
+    mentions = [interaction.user.mention] + [f"<@&{rid}>" for rid in TICKET_TEAM_ROLE_IDS]
     await ch.send(" ".join(mentions))
     await ch.send(
         "🎟️ **Novi ticket**\n"
