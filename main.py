@@ -75,6 +75,8 @@ INEXPERIENCED_ROLE_ID = _env_int("INEXPERIENCED_ROLE_ID") or 1460974855133462608
 
 # Kanal za dnevni shadow prijavu (10:00) i start (20:00)
 SHADOW_CHANNEL_ID = _env_int("SHADOW_CHANNEL_ID") or 1460378655829266695
+# Rola koja se taguje u dnevnoj shadow prijavi u 10:00
+SHADOW_SIGNUP_ROLE_ID = _env_int("SHADOW_SIGNUP_ROLE_ID") or 1453764199011319880
 # Kategorija -> rola koja se taguje u regular check poruci
 REGULAR_CHECK_CATEGORY_ROLE = {
     1528745104007757924: 1460974855133462608,  # inexperienced
@@ -853,7 +855,7 @@ async def _before_domaci_reminder():
 
 # ==================== SCHEDULER (shadow + regular check) ====================
 SHADOW_SIGNUP_TEXT = (
-    "📅 **{date}** — Shadow popodnevne smene u 20:00.\n"
+    "<@&{role_id}> 📅 **{date}** — Shadow popodnevne smene u 20:00.\n"
     "Reaguj sa ✅ na ovu poruku ako ćeš učestvovati."
 )
 
@@ -876,7 +878,9 @@ async def shadow_signup(now):
         print("[SHADOW] kanal nije nađen")
         return
     try:
-        msg = await channel.send(SHADOW_SIGNUP_TEXT.format(date=today.strftime("%d.%m.%Y")))
+        msg = await channel.send(
+            SHADOW_SIGNUP_TEXT.format(date=today.strftime("%d.%m.%Y"), role_id=SHADOW_SIGNUP_ROLE_ID)
+        )
         await msg.add_reaction("✅")
     except Exception as e:
         print("[SHADOW] signup send fail:", e)
