@@ -75,10 +75,16 @@ INEXPERIENCED_ROLE_ID = _env_int("INEXPERIENCED_ROLE_ID") or 1460974855133462608
 
 # Kanal za dnevni shadow prijavu (10:00) i start (20:00)
 SHADOW_CHANNEL_ID = _env_int("SHADOW_CHANNEL_ID") or 1460378655829266695
-# Kategorije čiji svi kanali dobijaju regular check svaka 3 dana u 12:00
-REGULAR_CHECK_CATEGORY_IDS = _env_int_list("REGULAR_CHECK_CATEGORY_IDS") or [
-    1528745104007757924,
-    1528744628164100187,
+# Kategorija -> rola koja se taguje u regular check poruci
+REGULAR_CHECK_CATEGORY_ROLE = {
+    1528745104007757924: 1460974855133462608,  # inexperienced
+    1528744628164100187: 1460974714720620604,  # experienced
+}
+# Role koje se taguju kada se ✅ odgovori na regular check pitanje
+CHECK_ANSWER_TAG_ROLE_IDS = [
+    1532337994726379620,
+    1453746980525314099,
+    1453746690342391808,
 ]
 # Eskalacija podsetnika (redom): svakih 6h se taguje sledeća rola u listi
 REMINDER_ROLE_IDS = _env_int_list("REMINDER_ROLE_IDS")
@@ -151,6 +157,15 @@ def init_db():
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(domaci)").fetchall()]
     if "kind" not in cols:
         conn.execute("ALTER TABLE domaci ADD COLUMN kind TEXT DEFAULT 'mass'")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS check_answers (
+            message_id INTEGER PRIMARY KEY,
+            channel_id INTEGER,
+            done INTEGER DEFAULT 0
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -210,6 +225,34 @@ def mark_domaci_done(message_id):
     conn = _db()
     conn.execute(
         "UPDATE domaci SET done = 1 WHERE message_id = ?", (message_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_check_answer(message_id, channel_id):
+    conn = _db()
+    conn.execute(
+        "INSERT OR IGNORE INTO check_answers (message_id, channel_id) VALUES (?,?)",
+        (message_id, channel_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_check_answer(message_id):
+    conn = _db()
+    row = conn.execute(
+        "SELECT * FROM check_answers WHERE message_id = ?", (message_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def mark_check_answer_done(message_id):
+    conn = _db()
+    conn.execute(
+        "UPDATE check_answers SET done = 1 WHERE message_id = ?", (message_id,)
     )
     conn.commit()
     conn.close()
@@ -815,9 +858,12 @@ SHADOW_SIGNUP_TEXT = (
 )
 
 REGULAR_CHECK_TEXT = (
-    "👋 **Regular check!**\n"
-    "Kako ti ide? Da li ti je nešto nejasno?\n"
-    "Tu smo kao tim za pomoć — što pre da pređeš na sledeći korak procesa zapošljavanja."
+    "Regular check <@&{role_id}> Kako ti ide trenutni tok obuke i da li ti je nešto nejasno?\n"
+    "Tu smo kao tim ukoliko ti je potrebna pomoć, i otvoreni smo za pitanja kako bi što pre da prešao na sledeći korak procesa zapošljavanja."
+)
+
+CHECK_ANSWER_TEXT = (
+    "Reaguj sa ✅ kada je odgovoreno na pitanje iznad."
 )
 
 
@@ -877,14 +923,18 @@ async def regular_check(now):
         except Exception:
             pass
     sent = 0
-    for cat_id in REGULAR_CHECK_CATEGORY_IDS:
+    for cat_id, role_id in REGULAR_CHECK_CATEGORY_ROLE.items():
         cat = bot.get_channel(cat_id) if cat_id else None
         if not cat:
             continue
         for ch in cat.channels:
             if isinstance(ch, discord.TextChannel):
                 try:
-                    await ch.send(REGULAR_CHECK_TEXT)
+                    await ch.send(REGULAR_CHECK_TEXT.format(role_id=role_id))
+                    await asyncio.sleep(SLEEP_BETWEEN_CALLS)
+                    ans = await ch.send(CHECK_ANSWER_TEXT)
+                    await ans.add_reaction("✅")
+                    add_check_answer(ans.id, ch.id)
                     sent += 1
                     await asyncio.sleep(SLEEP_BETWEEN_CALLS)
                 except Exception as e:
@@ -916,9 +966,6 @@ async def _before_scheduler():
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if str(payload.emoji) != "✅":
         return
-    d = get_domaci_by_message_id(payload.message_id)
-    if not d or d["done"]:
-        return
     guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
     if not guild:
         return
@@ -928,9 +975,26 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         return
     if member is None or member.bot:
         return
-    if not is_support(member):
+
+    # 1) domaći review ✅ (samo support)
+    d = get_domaci_by_message_id(payload.message_id)
+    if d and not d["done"]:
+        if is_support(member):
+            mark_domaci_done(payload.message_id)
         return
-    mark_domaci_done(payload.message_id)
+
+    # 2) regular check odgovoren → taguj role
+    ca = get_check_answer(payload.message_id)
+    if ca and not ca["done"]:
+        channel = bot.get_channel(ca["channel_id"]) if ca["channel_id"] else None
+        if channel:
+            mentions = " ".join(f"<@&{rid}>" for rid in CHECK_ANSWER_TAG_ROLE_IDS)
+            try:
+                await channel.send(f"{mentions} ✅ Regular check pitanje je odgovoreno.")
+            except Exception as e:
+                print("[CHECK] answer tag fail:", e)
+        mark_check_answer_done(payload.message_id)
+        return
 
 
 # ==================== RESYNC + ERROR ====================
