@@ -72,6 +72,14 @@ SHIFT_MAIN_ROLE_ID = _env_int("SHIFT_MAIN_ROLE_ID") or 1453781572460482753
 
 EXPERIENCED_ROLE_ID = _env_int("EXPERIENCED_ROLE_ID") or 1460974714720620604
 INEXPERIENCED_ROLE_ID = _env_int("INEXPERIENCED_ROLE_ID") or 1460974855133462608
+
+# Kanal za dnevni shadow prijavu (10:00) i start (20:00)
+SHADOW_CHANNEL_ID = _env_int("SHADOW_CHANNEL_ID") or 1460378655829266695
+# Kategorije čiji svi kanali dobijaju regular check svaka 3 dana u 12:00
+REGULAR_CHECK_CATEGORY_IDS = _env_int_list("REGULAR_CHECK_CATEGORY_IDS") or [
+    1528745104007757924,
+    1528744628164100187,
+]
 # Eskalacija podsetnika (redom): svakih 6h se taguje sledeća rola u listi
 REMINDER_ROLE_IDS = _env_int_list("REMINDER_ROLE_IDS")
 SUPPORT_ROLE_IDS = _env_int_list("SUPPORT_ROLE_IDS")
@@ -800,6 +808,109 @@ async def _before_domaci_reminder():
     await bot.wait_until_ready()
 
 
+# ==================== SCHEDULER (shadow + regular check) ====================
+SHADOW_SIGNUP_TEXT = (
+    "📅 **{date}** — Shadow popodnevne smene u 20:00.\n"
+    "Reaguj sa ✅ na ovu poruku ako ćeš učestvovati."
+)
+
+REGULAR_CHECK_TEXT = (
+    "👋 **Regular check!**\n"
+    "Kako ti ide? Da li ti je nešto nejasno?\n"
+    "Tu smo kao tim za pomoć — što pre da pređeš na sledeći korak procesa zapošljavanja."
+)
+
+
+async def shadow_signup(now):
+    today = now.date()
+    if get_state("last_shadow_signup") == today.isoformat():
+        return
+    channel = bot.get_channel(SHADOW_CHANNEL_ID) if SHADOW_CHANNEL_ID else None
+    if not channel:
+        print("[SHADOW] kanal nije nađen")
+        return
+    try:
+        msg = await channel.send(SHADOW_SIGNUP_TEXT.format(date=today.strftime("%d.%m.%Y")))
+        await msg.add_reaction("✅")
+    except Exception as e:
+        print("[SHADOW] signup send fail:", e)
+        return
+    set_state("shadow_msg_id", str(msg.id))
+    set_state("last_shadow_signup", today.isoformat())
+
+
+async def shadow_start(now):
+    today = now.date()
+    if get_state("last_shadow_start") == today.isoformat():
+        return
+    channel = bot.get_channel(SHADOW_CHANNEL_ID) if SHADOW_CHANNEL_ID else None
+    if not channel:
+        return
+    msg_id = get_state("shadow_msg_id")
+    if msg_id:
+        try:
+            msg = await channel.fetch_message(int(msg_id))
+            participants = []
+            for r in msg.reactions:
+                if str(r.emoji) == "✅":
+                    async for u in r.users():
+                        if not u.bot:
+                            participants.append(u.mention)
+            if participants:
+                text = "🔴 **Shadow je počeo!** " + ", ".join(participants)
+            else:
+                text = "🔴 **Shadow je počeo!** (niko se nije prijavio)"
+            await msg.reply(text)
+        except Exception as e:
+            print("[SHADOW] start fail:", e)
+    set_state("last_shadow_start", today.isoformat())
+
+
+async def regular_check(now):
+    today = now.date()
+    last = get_state("last_regular_check")
+    if last:
+        try:
+            last_date = datetime.fromisoformat(last).date()
+            if (today - last_date).days < 3:
+                return
+        except Exception:
+            pass
+    sent = 0
+    for cat_id in REGULAR_CHECK_CATEGORY_IDS:
+        cat = bot.get_channel(cat_id) if cat_id else None
+        if not cat:
+            continue
+        for ch in cat.channels:
+            if isinstance(ch, discord.TextChannel):
+                try:
+                    await ch.send(REGULAR_CHECK_TEXT)
+                    sent += 1
+                    await asyncio.sleep(SLEEP_BETWEEN_CALLS)
+                except Exception as e:
+                    print("[CHECK] send fail:", e)
+    set_state("last_regular_check", today.isoformat())
+    print(f"[CHECK] regular check poslat u {sent} kanala")
+
+
+@tasks.loop(minutes=1)
+async def scheduler_loop():
+    now = _local_now()
+    if now.minute > 1:
+        return
+    if now.hour == 10:
+        await shadow_signup(now)
+    elif now.hour == 20:
+        await shadow_start(now)
+    elif now.hour == 12:
+        await regular_check(now)
+
+
+@scheduler_loop.before_loop
+async def _before_scheduler():
+    await bot.wait_until_ready()
+
+
 # ==================== EVENTS ====================
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
@@ -881,6 +992,9 @@ async def on_ready():
         if not domaci_reminder_loop.is_running():
             domaci_reminder_loop.start()
             print("✅ Domaći reminder task pokrenut")
+        if not scheduler_loop.is_running():
+            scheduler_loop.start()
+            print("✅ Scheduler task pokrenut (shadow + regular check)")
         asyncio.create_task(start_http_server())
     except Exception as e:
         print("sync fail:", e)
