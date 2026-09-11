@@ -1000,21 +1000,13 @@ async def hours(interaction: discord.Interaction, user: discord.Member = None):
     await interaction.response.send_message(text, ephemeral=False)
 
 
-@tree.command(name="bump", description="Ručno pokreni shadow bump za trenutni ticket", guild=GUILD_OBJ)
+@tree.command(name="bump", description="Ručno pokreni shadow bump za sve sa shadow rolom", guild=GUILD_OBJ)
 async def bump(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    t = get_ticket(interaction.channel.id)
-    if not t:
-        return await interaction.followup.send(
-            "❌ Ova komanda radi samo u ticket kanalu.", ephemeral=True
-        )
-    user_id = t["user_id"]
-    total = get_hours(user_id)
-    await interaction.channel.send(
-        f"📊 **Shadow progres** — <@{user_id}> trenutno ima **{format_hours(total)}** "
-        f"od **{SHADOW_GOAL_HOURS}h** cilja. Nastavi dalje!"
+    count = await run_all_bumps()
+    await interaction.followup.send(
+        f"✅ Bump poslat — {count} shadow korisnika.", ephemeral=True
     )
-    await interaction.followup.send("✅ Bump poslat.", ephemeral=True)
 
 
 # ==================== 6H REMINDER LOOP ====================
@@ -1174,7 +1166,7 @@ async def bump_user(user_id):
 async def run_all_bumps():
     guild = bot.get_guild(int(GUILD_ID)) if GUILD_ID else None
     if not guild:
-        return
+        return 0
     role_id = SHADOW_SIGNUP_ROLE_ID
     bumped = 0
     seen = set()
@@ -1193,6 +1185,7 @@ async def run_all_bumps():
         await bump_user(user_id)
         bumped += 1
     print(f"[BUMP] bumpano {bumped} korisnika")
+    return bumped
 
 
 async def shadow_bump(now):
