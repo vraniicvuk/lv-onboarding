@@ -75,8 +75,12 @@ INEXPERIENCED_ROLE_ID = _env_int("INEXPERIENCED_ROLE_ID") or 1460974855133462608
 
 # Kanal za dnevni shadow prijavu (10:00) i start (20:00)
 SHADOW_CHANNEL_ID = _env_int("SHADOW_CHANNEL_ID") or 1460378655829266695
-# Rola koja se taguje u dnevnoj shadow prijavi u 10:00
+# Rola koja se taguje u dnevnoj shadow prijavi u 10:00 (ujedno i rola shadow učesnika za bump)
 SHADOW_SIGNUP_ROLE_ID = _env_int("SHADOW_SIGNUP_ROLE_ID") or 1453764199011319880
+# Kanal u kom rade /ci i /co (shadow time tracking)
+SHADOW_TIME_CHANNEL_ID = _env_int("SHADOW_TIME_CHANNEL_ID") or 1547914237530210414
+# Cilj sati za shadow
+SHADOW_GOAL_HOURS = 20
 # Kategorija -> rola koja se taguje u regular check poruci
 REGULAR_CHECK_CATEGORY_ROLE = {
     1528745104007757924: 1460974855133462608,  # inexperienced
@@ -165,6 +169,31 @@ def init_db():
             message_id INTEGER PRIMARY KEY,
             channel_id INTEGER,
             done INTEGER DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shadow_active (
+            user_id INTEGER PRIMARY KEY,
+            start_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shadow_hours (
+            user_id INTEGER PRIMARY KEY,
+            seconds INTEGER DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tickets (
+            channel_id INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            level TEXT
         )
         """
     )
@@ -260,6 +289,98 @@ def mark_check_answer_done(message_id):
     conn.close()
 
 
+# ---- shadow time tracking ----
+def start_session(user_id, start_at):
+    conn = _db()
+    conn.execute(
+        "INSERT OR REPLACE INTO shadow_active (user_id, start_at) VALUES (?,?)",
+        (user_id, start_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_active_session(user_id):
+    conn = _db()
+    row = conn.execute(
+        "SELECT start_at FROM shadow_active WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    return row["start_at"] if row else None
+
+
+def end_session(user_id):
+    conn = _db()
+    conn.execute("DELETE FROM shadow_active WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def add_hours(user_id, seconds):
+    conn = _db()
+    conn.execute(
+        "INSERT INTO shadow_hours (user_id, seconds) VALUES (?,?) "
+        "ON CONFLICT(user_id) DO UPDATE SET seconds = seconds + ?",
+        (user_id, seconds, seconds),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_hours(user_id):
+    conn = _db()
+    row = conn.execute(
+        "SELECT seconds FROM shadow_hours WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    return row["seconds"] if row else 0
+
+
+# ---- tickets ----
+def add_ticket(channel_id, user_id, level=None):
+    conn = _db()
+    conn.execute(
+        "INSERT OR IGNORE INTO tickets (channel_id, user_id, level) VALUES (?,?,?)",
+        (channel_id, user_id, level),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_ticket_level(channel_id, level):
+    conn = _db()
+    conn.execute(
+        "UPDATE tickets SET level = ? WHERE channel_id = ?", (level, channel_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_ticket(channel_id):
+    conn = _db()
+    row = conn.execute(
+        "SELECT * FROM tickets WHERE channel_id = ?", (channel_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_tickets_for_user(user_id):
+    conn = _db()
+    rows = conn.execute(
+        "SELECT channel_id FROM tickets WHERE user_id = ?", (user_id,)
+    ).fetchall()
+    conn.close()
+    return [r["channel_id"] for r in rows]
+
+
+def get_all_ticket_users():
+    conn = _db()
+    rows = conn.execute("SELECT DISTINCT user_id FROM tickets").fetchall()
+    conn.close()
+    return [r["user_id"] for r in rows]
+
+
 # ==================== UTILS ====================
 def get_user_shift(member):
     found = [
@@ -288,6 +409,13 @@ def is_support(member):
     if member.guild_permissions.manage_roles or member.guild_permissions.administrator:
         return True
     return any(r.id in TICKET_TEAM_ROLE_IDS for r in member.roles)
+
+
+def format_hours(seconds):
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    return f"{h}h {m:02d}m"
 
 
 async def safe_add_roles(member, roles, reason):
@@ -631,6 +759,8 @@ class TicketFlowView(View):
         except Exception as e:
             print("[TICKET] routing fail:", e)
 
+        set_ticket_level(interaction.channel.id, self.level)
+
         if self.level == "experienced":
             try:
                 await interaction.channel.send(
@@ -672,6 +802,8 @@ async def ticket(interaction: discord.Interaction):
         )
     except Exception as e:
         return await interaction.followup.send(f"❌ Greška: {e}", ephemeral=True)
+
+    add_ticket(ch.id, interaction.user.id)
 
     mentions = [interaction.user.mention] + [f"<@&{rid}>" for rid in TICKET_TEAM_ROLE_IDS]
     await ch.send(" ".join(mentions))
@@ -807,6 +939,82 @@ async def shift(interaction: discord.Interaction, smena: str):
         f"(satnica {SHIFT_SCHEDULE.get(smena, '')}).",
         ephemeral=True,
     )
+
+
+# ==================== SHADOW TIME TRACKING ====================
+@tree.command(name="ci", description="Clock in — počni shadow sesiju", guild=GUILD_OBJ)
+async def ci(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if interaction.channel.id != SHADOW_TIME_CHANNEL_ID:
+        return await interaction.followup.send(
+            "❌ /ci radi samo u shadow kanalu.", ephemeral=True
+        )
+    if get_active_session(interaction.user.id):
+        return await interaction.followup.send("❌ Već si clocked in.", ephemeral=True)
+    start_session(interaction.user.id, _local_now().isoformat())
+    await interaction.followup.send(
+        f"✅ Clocked in — {interaction.user.mention} u {_local_now().strftime('%H:%M')}.",
+        ephemeral=False,
+    )
+
+
+@tree.command(name="co", description="Clock out — završi shadow sesiju", guild=GUILD_OBJ)
+async def co(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if interaction.channel.id != SHADOW_TIME_CHANNEL_ID:
+        return await interaction.followup.send(
+            "❌ /co radi samo u shadow kanalu.", ephemeral=True
+        )
+    start_at = get_active_session(interaction.user.id)
+    if not start_at:
+        return await interaction.followup.send("❌ Nisi clocked in.", ephemeral=True)
+    end = _local_now()
+    try:
+        start_dt = datetime.fromisoformat(start_at)
+    except Exception:
+        start_dt = end
+    seconds = int((end - start_dt).total_seconds())
+    add_hours(interaction.user.id, seconds)
+    end_session(interaction.user.id)
+    total = get_hours(interaction.user.id)
+    await interaction.followup.send(
+        f"✅ Clocked out — {interaction.user.mention}.\n"
+        f"Sesija: **{format_hours(seconds)}** • Ukupno: **{format_hours(total)}**",
+        ephemeral=False,
+    )
+
+
+@tree.command(name="hours", description="Prikaži shadow sate", guild=GUILD_OBJ)
+async def hours(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    total = get_hours(target.id)
+    active = get_active_session(target.id)
+    text = f"⏱️ {target.mention}: **{format_hours(total)}**"
+    if active:
+        try:
+            start_dt = datetime.fromisoformat(active)
+            elapsed = int((_local_now() - start_dt).total_seconds())
+            text += f" (trenutna sesija u toku: {format_hours(elapsed)})"
+        except Exception:
+            pass
+    await interaction.response.send_message(text, ephemeral=False)
+
+
+@tree.command(name="bump", description="Ručno pokreni shadow bump za trenutni ticket", guild=GUILD_OBJ)
+async def bump(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    t = get_ticket(interaction.channel.id)
+    if not t:
+        return await interaction.followup.send(
+            "❌ Ova komanda radi samo u ticket kanalu.", ephemeral=True
+        )
+    user_id = t["user_id"]
+    total = get_hours(user_id)
+    await interaction.channel.send(
+        f"📊 **Shadow progres** — <@{user_id}> trenutno ima **{format_hours(total)}** "
+        f"od **{SHADOW_GOAL_HOURS}h** cilja. Nastavi dalje!"
+    )
+    await interaction.followup.send("✅ Bump poslat.", ephemeral=True)
 
 
 # ==================== 6H REMINDER LOOP ====================
@@ -947,6 +1155,59 @@ async def regular_check(now):
     print(f"[CHECK] regular check poslat u {sent} kanala")
 
 
+async def bump_user(user_id):
+    total = get_hours(user_id)
+    text = (
+        f"📊 **Shadow progres** — <@{user_id}> trenutno ima **{format_hours(total)}** "
+        f"od **{SHADOW_GOAL_HOURS}h** cilja. Nastavi dalje!"
+    )
+    for ch_id in get_tickets_for_user(user_id):
+        ch = bot.get_channel(ch_id) if ch_id else None
+        if ch:
+            try:
+                await ch.send(text)
+            except Exception as e:
+                print("[BUMP] send fail:", e)
+            await asyncio.sleep(SLEEP_BETWEEN_CALLS)
+
+
+async def run_all_bumps():
+    guild = bot.get_guild(int(GUILD_ID)) if GUILD_ID else None
+    if not guild:
+        return
+    role_id = SHADOW_SIGNUP_ROLE_ID
+    bumped = 0
+    seen = set()
+    for user_id in get_all_ticket_users():
+        if user_id in seen:
+            continue
+        seen.add(user_id)
+        try:
+            member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+        except Exception:
+            continue
+        if member is None:
+            continue
+        if not any(r.id == role_id for r in member.roles):
+            continue
+        await bump_user(user_id)
+        bumped += 1
+    print(f"[BUMP] bumpano {bumped} korisnika")
+
+
+async def shadow_bump(now):
+    today = now.date()
+    last = get_state("last_shadow_bump")
+    if last:
+        try:
+            if (today - datetime.fromisoformat(last).date()).days < 3:
+                return
+        except Exception:
+            pass
+    await run_all_bumps()
+    set_state("last_shadow_bump", today.isoformat())
+
+
 @tasks.loop(minutes=1)
 async def scheduler_loop():
     now = _local_now()
@@ -958,6 +1219,7 @@ async def scheduler_loop():
         await shadow_start(now)
     elif now.hour == 12:
         await regular_check(now)
+        await shadow_bump(now)
 
 
 @scheduler_loop.before_loop
