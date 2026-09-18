@@ -804,6 +804,8 @@ async def create_onboarding_ticket(guild, member):
     await ch.send(
         "🎟️ **Novi ticket**\n"
         f"Korisnik: {member.mention}\n\n"
+        f"{member.mention} molim te da iz padajućeg menija prvo izabereš **smenu** u kojoj bi radio, "
+        "a zatim i da li **imaš iskustva**, kako bismo nastavili dalje.\n\n"
         "Izaberi svoju smenu:",
         view=TicketFlowView(),
     )
