@@ -41,6 +41,7 @@ REMINDER_STAGE_HOURS = 6  # svaka faza podsetnika na 6 sati
 
 # ---------- BOT ----------
 INTENTS = discord.Intents.default()
+INTENTS.members = True  # potrebno za on_member_join (uključi Server Members Intent i u Dev Portalu)
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
 tree = bot.tree
 GUILD_OBJ = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
@@ -770,19 +771,15 @@ class TicketFlowView(View):
                 print("[TICKET] experienced questions fail:", e)
 
 
-@tree.command(name="ticket", description="Otvori novi ticket", guild=GUILD_OBJ)
-async def ticket(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    guild = interaction.guild
+async def create_onboarding_ticket(guild, member):
+    """Kreira ticket kanal + pokreće flow (smena -> nivo iskustva). Vraća kanal."""
     category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
     if not category:
-        return await interaction.followup.send(
-            "❌ TICKET_CATEGORY_ID nije validan.", ephemeral=True
-        )
+        raise RuntimeError("TICKET_CATEGORY_ID nije validan.")
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        interaction.user: discord.PermissionOverwrite(
+        member: discord.PermissionOverwrite(
             view_channel=True, send_messages=True, read_messages=True
         ),
     }
@@ -793,29 +790,68 @@ async def ticket(interaction: discord.Interaction):
                 view_channel=True, send_messages=True, read_messages=True
             )
 
-    try:
-        ch = await guild.create_text_channel(
-            name=f"ticket-{interaction.user.name}",
-            category=category,
-            overwrites=overwrites,
-            reason=f"Ticket by {interaction.user}",
-        )
-    except Exception as e:
-        return await interaction.followup.send(f"❌ Greška: {e}", ephemeral=True)
+    ch = await guild.create_text_channel(
+        name=f"ticket-{member.name}",
+        category=category,
+        overwrites=overwrites,
+        reason=f"Ticket by {member}",
+    )
 
-    add_ticket(ch.id, interaction.user.id)
+    add_ticket(ch.id, member.id)
 
-    mentions = [interaction.user.mention] + [f"<@&{rid}>" for rid in TICKET_TEAM_ROLE_IDS]
+    mentions = [member.mention] + [f"<@&{rid}>" for rid in TICKET_TEAM_ROLE_IDS]
     await ch.send(" ".join(mentions))
     await ch.send(
         "🎟️ **Novi ticket**\n"
-        f"Korisnik: {interaction.user.mention}\n\n"
+        f"Korisnik: {member.mention}\n\n"
         "Izaberi svoju smenu:",
         view=TicketFlowView(),
     )
+    return ch
+
+
+@tree.command(name="ticket", description="Otvori novi ticket", guild=GUILD_OBJ)
+async def ticket(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        ch = await create_onboarding_ticket(interaction.guild, interaction.user)
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Greška: {e}", ephemeral=True)
     await interaction.followup.send(
         f"✅ Ticket otvoren → {ch.mention}", ephemeral=True
     )
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    """Novi član -> automatski ticket sa izborom smene i nivoa iskustva."""
+    if member.bot:
+        return
+    guild = member.guild
+    if GUILD_ID and guild.id != int(GUILD_ID):
+        return
+
+    # ako već ima otvoren ticket kanal (rejoin), ne pravimo novi
+    try:
+        for cid in get_tickets_for_user(member.id):
+            if guild.get_channel(cid):
+                print(f"[JOIN] {member} već ima ticket {cid}", flush=True)
+                return
+    except Exception as e:
+        print(f"[JOIN] provera postojećih ticketa fail: {e}", flush=True)
+    suffix = f"-{member.name}".lower()
+    if any(
+        isinstance(c, discord.TextChannel) and c.name.startswith("ticket-") and c.name.endswith(suffix)
+        for c in guild.channels
+    ):
+        print(f"[JOIN] {member} već ima ticket kanal", flush=True)
+        return
+
+    try:
+        ch = await create_onboarding_ticket(guild, member)
+        print(f"[JOIN] {member} -> ticket #{ch.name}", flush=True)
+    except Exception as e:
+        print(f"[JOIN] ticket fail za {member}: {e}", flush=True)
 
 
 # ==================== /close + /delete ====================
